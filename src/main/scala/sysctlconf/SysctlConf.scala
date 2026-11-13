@@ -132,7 +132,8 @@ object SysctlConf {
   /** キーを検査し、`.`区切りに正規化して返す。 */
   private def normalizeKey(raw: String, line: Int): Either[SysctlError, String] = {
     def error(reason: SyntaxReason) = Left(SysctlError.Syntax(line, reason))
-    val key                         = toDotted(raw)
+
+    val key = toDotted(raw)
     if (raw.isEmpty) error(SyntaxReason.EmptyKey)
     else if (raw.startsWith("-")) error(SyntaxReason.RepeatedDash)
     else if (raw.exists(isAnySpace)) error(SyntaxReason.WhitespaceInKey)
@@ -179,7 +180,8 @@ object SysctlConf {
   /** `entry`と衝突している定義済みのキー（一方がもう一方の階層の途中にあるもの）を探してエラーにする。 */
   private def conflict(entries: Vector[Entry], entry: Entry): SysctlError = {
     def isAncestor(a: String, b: String) = b.startsWith(a + ".")
-    val definedAt                        = entries
+
+    val definedAt = entries
       .findLast(e => isAncestor(e.key, entry.key) || isAncestor(entry.key, e.key))
       .fold(entry.line)(_.line)
     SysctlError.KeyConflict(entry.line, entry.key, definedAt)
