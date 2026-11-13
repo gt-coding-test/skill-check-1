@@ -29,7 +29,7 @@ private[sysctlconf] object LineSyntax {
 
   /** 全角スペースやNBSPを含む、Unicodeの空白。キーの検査に使う。
     *
-    * 前後の除去はsysctl(8)に合わせてASCIIの空白だけを対象にするので、全角スペースはキーの側に残る。 見た目で気付けない入力ミスになるため、キーに含まれていたらエラーにする。
+    * 前後の除去はsysctl(8)に合わせてASCIIの空白だけを対象にするので、全角スペースはキーの側に残る。見た目で気付けない入力ミスになるため、キーに含まれていたらエラーにする。
     */
   private def isAnySpace(c: Char): Boolean = isSpace(c) || c.isWhitespace || c.isSpaceChar
 

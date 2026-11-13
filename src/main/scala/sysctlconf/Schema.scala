@@ -63,7 +63,7 @@ final case class Schema private (fields: Vector[SchemaField], unknownKeysAllowed
     *
     * 同じキーが複数回書かれている場合は、後勝ちで有効になる値だけを検証する。除外行（`-key`）は検証しない。
     *
-    * 従っていれば`conf`をそのまま返す。不備があれば最初の1件で止めず、すべてを`Left`で返す （設定ファイルの行の順、続いて不足しているキーをスキーマの定義順）。
+    * 従っていれば`conf`をそのまま返す。不備があれば最初の1件で止めず、すべてを`Left`で返す（設定ファイルの行の順、続いて不足しているキーをスキーマの定義順）。
     */
   def validate(conf: SysctlConf): Either[Vector[Violation], SysctlConf] = {
     val effective = conf.entries.foldLeft(VectorMap.empty[String, Entry]) { (acc, entry) =>
