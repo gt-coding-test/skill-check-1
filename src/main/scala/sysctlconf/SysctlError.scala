@@ -17,11 +17,19 @@ enum SysctlError {
     */
   case KeyConflict(line: Int, key: String, definedAt: Int)
 
+  /** スキーマファイル自体をロードできなかった（読み込めない、書式が誤っている等）。 */
+  case InvalidSchema(error: SchemaError)
+
+  /** 設定がスキーマに従っていない。`violations`は1件以上で、見つかった不備をすべて含む。 */
+  case SchemaViolation(violations: Vector[Violation])
+
   def message: String = this match {
     case Io(path, cause)                   => s"failed to read $path: $cause"
     case Syntax(line, reason)              => s"line $line: ${reason.message}"
     case KeyConflict(line, key, definedAt) =>
       s"line $line: key '$key' conflicts with the key defined at line $definedAt"
+    case InvalidSchema(error)        => s"invalid schema: ${error.message}"
+    case SchemaViolation(violations) => violations.map(_.message).mkString("\n")
   }
 }
 

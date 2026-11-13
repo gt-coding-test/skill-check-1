@@ -51,6 +51,20 @@ object SysctlConf {
   def load(path: Path): Either[SysctlError, SysctlConf] =
     LineSyntax.readFile(path).left.map(SysctlError.Io(path, _)).flatMap(parse)
 
+  /** ファイルをロードし、スキーマファイルに従っているか検証する。
+    *
+    * スキーマファイルの書式は[[Schema.parse]]、検証の内容は[[Schema.validate]]を参照。
+    *
+    * 先にスキーマファイルをロードし、不備があれば[[SysctlError.InvalidSchema]]を返す。続いて設定ファイルをロードし、
+    * 設定がスキーマに従っていなければ[[SysctlError.SchemaViolation]]を返す。
+    */
+  def load(path: Path, schemaPath: Path): Either[SysctlError, SysctlConf] =
+    Schema.load(schemaPath).left.map(SysctlError.InvalidSchema(_)).flatMap(load(path, _))
+
+  /** ファイルをロードし、ロード済みのスキーマに従っているか検証する。 */
+  def load(path: Path, schema: Schema): Either[SysctlError, SysctlConf] =
+    load(path).flatMap(validate(_, schema))
+
   /** sysctl.conf形式の文字列をパースする。
     *
     * 文法はsysctl.conf(5)と、procpsのsysctl(8)の実装に従う:
@@ -82,6 +96,13 @@ object SysctlConf {
       } yield next
     }
   }
+
+  /** 文字列をパースし、ロード済みのスキーマに従っているか検証する。 */
+  def parse(input: String, schema: Schema): Either[SysctlError, SysctlConf] =
+    parse(input).flatMap(validate(_, schema))
+
+  private def validate(conf: SysctlConf, schema: Schema): Either[SysctlError, SysctlConf] =
+    schema.validate(conf).left.map(SysctlError.SchemaViolation(_))
 
   private type Tree = VectorMap[String, SysctlValue]
 

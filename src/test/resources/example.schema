@@ -1,0 +1,4 @@
+endpoint -> string
+debug -> bool
+log.file -> string
+retry -> integer
