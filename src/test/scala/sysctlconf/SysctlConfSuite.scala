@@ -266,6 +266,12 @@ class SysctlConfSuite extends munit.FunSuite {
     }
   }
 
+  test("キーに全角スペースなど非ASCIIの空白があればエラー") {
+    List("\u3000a = 1", "a\u3000= 1", "a\u3000b = 1", "a\u00A0b = 1", "-\u3000a").foreach { input =>
+      assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.WhitespaceInKey), input)
+    }
+  }
+
   test("キーに空のセグメントがあればエラー") {
     List(".a = 1", "a. = 1", "a..b = 1", "a//b = 1", "-a..b").foreach { input =>
       assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.EmptySegment), input)

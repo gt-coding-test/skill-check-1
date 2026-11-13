@@ -37,7 +37,7 @@ enum SyntaxReason(val message: String) {
   /** 行頭の`-`が2つ以上ある（`--key = 1`）。 */
   case RepeatedDash extends SyntaxReason("only a single leading '-' is allowed")
 
-  /** キーに空白が含まれる（`a b = 1`や`- key = 1`）。 */
+  /** キーに空白が含まれる（`a b = 1`や`- key = 1`）。全角スペースなど非ASCIIの空白も対象。 */
   case WhitespaceInKey extends SyntaxReason("key must not contain whitespace")
 
   /** キーに空のセグメントがある（`a..b`、`.a`、`a.`）。 */

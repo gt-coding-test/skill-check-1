@@ -99,9 +99,15 @@ object SysctlConf {
     try Right(Files.readString(path, StandardCharsets.UTF_8))
     catch { case e: IOException => Left(SysctlError.Io(path, e)) }
 
-  /** Cの`isspace`と同じ空白の定義。行・キー・値の前後の除去と、キーの検査の両方でこれを使う。 */
+  /** Cの`isspace`と同じ空白の定義。行・キー・値の前後の除去に使う。 */
   private def isSpace(c: Char): Boolean =
     c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r'
+
+  /** 全角スペースやNBSPを含む、Unicodeの空白。キーの検査に使う。
+    *
+    * 前後の除去はsysctl(8)に合わせてASCIIの空白だけを対象にするので、全角スペースはキーの側に残る。 見た目で気付けない入力ミスになるため、キーに含まれていたらエラーにする。
+    */
+  private def isAnySpace(c: Char): Boolean = isSpace(c) || c.isWhitespace || c.isSpaceChar
 
   private def stripLeft(s: String): String  = s.dropWhile(isSpace)
   private def stripRight(s: String): String = s.take(s.lastIndexWhere(!isSpace(_)) + 1)
@@ -129,7 +135,7 @@ object SysctlConf {
     val key                         = toDotted(raw)
     if (raw.isEmpty) error(SyntaxReason.EmptyKey)
     else if (raw.startsWith("-")) error(SyntaxReason.RepeatedDash)
-    else if (raw.exists(isSpace)) error(SyntaxReason.WhitespaceInKey)
+    else if (raw.exists(isAnySpace)) error(SyntaxReason.WhitespaceInKey)
     else if (key.split("\\.", -1).exists(_.isEmpty)) error(SyntaxReason.EmptySegment)
     else Right(key)
   }
