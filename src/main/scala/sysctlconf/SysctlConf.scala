@@ -5,10 +5,10 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.collection.immutable.VectorMap
 
-/** sysctl.conf形式の1行分の設定。
+/** `key = value`形式の1行分の設定。
   *
   * @param key
-  *   `=`の左辺（前後の空白と先頭の`-`を除いたもの）
+  *   `=`の左辺。前後の空白と行頭の`-`を除き、`.`区切りに正規化したもの
   * @param value
   *   `=`の右辺（前後の空白を除いたもの）
   * @param ignoreErrors
@@ -18,14 +18,26 @@ import scala.collection.immutable.VectorMap
   */
 final case class Entry(key: String, value: String, ignoreErrors: Boolean, line: Int)
 
+/** `-key`形式（`=`無し）の除外行。
+  *
+  * sysctl(8)では「このキー（globパターン可）には設定しない」という意味。値を持たないのでMapには入れない。
+  */
+final case class Exclusion(key: String, line: Int)
+
 /** パース済みのsysctl.conf。
   *
   * @param entries
   *   ファイルに書かれていた設定を出現順にすべて保持する（重複キーも含む）
+  * @param exclusions
+  *   `-key`形式の除外行を出現順に保持する
   * @param tree
   *   キーを`.`で階層化したMap。同じキーが複数回書かれていた場合は後勝ち。
   */
-final case class SysctlConf private (entries: Vector[Entry], tree: Map[String, SysctlValue]) {
+final case class SysctlConf private (
+    entries: Vector[Entry],
+    exclusions: Vector[Exclusion],
+    tree: Map[String, SysctlValue]
+) {
 
   /** キーを階層化しないフラットなMap（`"log.file" -> "/var/log/console.log"`）。重複キーは後勝ち。 */
   lazy val toMap: Map[String, String] =
@@ -43,66 +55,100 @@ object SysctlConf {
 
   /** sysctl.conf形式の文字列をパースする。
     *
-    * 文法はsysctl.conf(5)に従う:
+    * 文法はsysctl.conf(5)と、procpsのsysctl(8)の実装に従う:
     *   - 1行は`token = value`形式。`=`の前後の空白は任意
     *   - 空行、および`#`か`;`で始まる行は無視する
     *   - 行頭の`-`は「設定失敗を無視する」フラグとして[[Entry.ignoreErrors]]に保持する
+    *   - `=`の無い`-key`は除外行として[[SysctlConf.exclusions]]に保持する
     *   - 値は引用符不要で、空白や`=`を含んでよい（最初の`=`で分割する）
+    *   - キーは`/`区切りでも書ける（`net/ipv4/ip_forward`）。`.`区切りに正規化する
     *
     * 最初に見つかったエラーを`Left`で返す。
     */
   def parse(input: String): Either[SysctlError, SysctlConf] = {
-    val lines = input.stripPrefix("\uFEFF").linesIterator.zipWithIndex
-
-    val init: Either[SysctlError, (Vector[Entry], Tree)] = Right((Vector.empty, VectorMap.empty))
-    lines
-      .foldLeft(init) { case (acc, (raw, index)) =>
-        for {
-          state <- acc
-          (entries, tree) = state
-          parsed <- parseLine(raw, index + 1)
-          next   <- parsed match {
-            case None        => Right(state)
-            case Some(entry) =>
-              insert(tree, entry.key.split('.').toList, entry.value)
-                .toRight(conflict(entries, entry))
-                .map((entries :+ entry, _))
-          }
-        } yield next
-      }
-      .map { case (entries, tree) => new SysctlConf(entries, tree) }
+    val empty: Either[SysctlError, SysctlConf] =
+      Right(new SysctlConf(Vector.empty, Vector.empty, VectorMap.empty))
+    input.stripPrefix(Bom).linesIterator.zipWithIndex.foldLeft(empty) { case (acc, (raw, index)) =>
+      for {
+        conf   <- acc
+        parsed <- parseLine(raw, index + 1)
+        next   <- parsed match {
+          case Line.Skip               => Right(conf)
+          case Line.Exclude(exclusion) =>
+            Right(new SysctlConf(conf.entries, conf.exclusions :+ exclusion, conf.tree))
+          case Line.Setting(entry) =>
+            insert(VectorMap.from(conf.tree), entry.key.split('.').toList, entry.value)
+              .toRight(conflict(conf.entries, entry))
+              .map(tree => new SysctlConf(conf.entries :+ entry, conf.exclusions, tree))
+        }
+      } yield next
+    }
   }
 
+  private val Bom = "\uFEFF"
+
   private type Tree = VectorMap[String, SysctlValue]
+
+  private enum Line {
+    case Skip
+    case Setting(entry: Entry)
+    case Exclude(exclusion: Exclusion)
+  }
 
   private def readFile(path: Path): Either[SysctlError, String] =
     try Right(Files.readString(path, StandardCharsets.UTF_8))
     catch { case e: IOException => Left(SysctlError.Io(path, e)) }
 
-  /** 1行をパースする。空行・コメント行は`Right(None)`。 */
-  private def parseLine(raw: String, line: Int): Either[SysctlError, Option[Entry]] = {
-    val trimmed = raw.trim
-    if (trimmed.isEmpty || trimmed.startsWith("#") || trimmed.startsWith(";")) Right(None)
+  /** Cの`isspace`と同じ空白の定義。行・キー・値の前後の除去と、キーの検査の両方でこれを使う。 */
+  private def isSpace(c: Char): Boolean =
+    c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r'
+
+  private def stripLeft(s: String): String  = s.dropWhile(isSpace)
+  private def stripRight(s: String): String = s.take(s.lastIndexWhere(!isSpace(_)) + 1)
+
+  private def parseLine(raw: String, line: Int): Either[SysctlError, Line] = {
+    val text = stripRight(stripLeft(raw))
+    if (text.isEmpty || text.startsWith("#") || text.startsWith(";")) Right(Line.Skip)
     else {
-      val ignoreErrors = trimmed.startsWith("-")
-      val body         = if (ignoreErrors) trimmed.drop(1) else trimmed
+      val dash = text.startsWith("-")
+      val body = if (dash) text.drop(1) else text
       body.indexOf('=') match {
-        case -1 => Left(SysctlError.Syntax(line, SyntaxReason.MissingEquals))
-        case i  =>
-          val key   = body.take(i).trim
-          val value = body.drop(i + 1).trim
-          validateKey(key, line).map(_ => Some(Entry(key, value, ignoreErrors, line)))
+        case -1 if dash => normalizeKey(body, line).map(key => Line.Exclude(Exclusion(key, line)))
+        case -1         => Left(SysctlError.Syntax(line, SyntaxReason.MissingEquals))
+        case i          =>
+          val value = stripLeft(body.drop(i + 1))
+          normalizeKey(stripRight(body.take(i)), line)
+            .map(key => Line.Setting(Entry(key, value, ignoreErrors = dash, line)))
       }
     }
   }
 
-  private def validateKey(key: String, line: Int): Either[SysctlError, Unit] =
-    if (key.isEmpty) Left(SysctlError.Syntax(line, SyntaxReason.EmptyKey))
-    else if (key.exists(_.isWhitespace))
-      Left(SysctlError.Syntax(line, SyntaxReason.WhitespaceInKey))
-    else if (key.split("\\.", -1).exists(_.isEmpty))
-      Left(SysctlError.Syntax(line, SyntaxReason.EmptySegment))
-    else Right(())
+  /** キーを検査し、`.`区切りに正規化して返す。 */
+  private def normalizeKey(raw: String, line: Int): Either[SysctlError, String] = {
+    def error(reason: SyntaxReason) = Left(SysctlError.Syntax(line, reason))
+    val key                         = toDotted(raw)
+    if (raw.isEmpty) error(SyntaxReason.EmptyKey)
+    else if (raw.startsWith("-")) error(SyntaxReason.RepeatedDash)
+    else if (raw.exists(isSpace)) error(SyntaxReason.WhitespaceInKey)
+    else if (key.split("\\.", -1).exists(_.isEmpty)) error(SyntaxReason.EmptySegment)
+    else Right(key)
+  }
+
+  /** sysctl(8)と同じ規則で区切り文字を`.`に揃える。
+    *
+    * 最初に現れた区切りが`/`なら、`/`と`.`を入れ替える。`net/ipv4/conf/eth0.100/rp_filter`は
+    * `net.ipv4.conf.eth0/100.rp_filter`になり、名前に`.`を含むインターフェースも1セグメントとして扱える。
+    */
+  private def toDotted(key: String): String =
+    key.find(c => c == '.' || c == '/') match {
+      case Some('/') =>
+        key.map {
+          case '/' => '.'
+          case '.' => '/'
+          case c   => c
+        }
+      case _ => key
+    }
 
   /** `path`の位置に値を置いた新しいツリーを返す。値と階層が同じ位置に来る場合は`None`。 */
   private def insert(tree: Tree, path: List[String], value: String): Option[Tree] =

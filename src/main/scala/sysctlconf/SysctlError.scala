@@ -28,13 +28,16 @@ enum SysctlError {
 /** [[SysctlError.Syntax]]の理由。 */
 enum SyntaxReason(val message: String) {
 
-  /** `=`が無い。 */
+  /** `=`が無い（`-key`形式の除外行を除く）。 */
   case MissingEquals extends SyntaxReason("expected 'token = value' but '=' was not found")
 
-  /** キーが空（`= 1`）。 */
+  /** キーが空（`= 1`や`-`だけの行）。 */
   case EmptyKey extends SyntaxReason("key is empty")
 
-  /** キーに空白が含まれる（`a b = 1`）。 */
+  /** 行頭の`-`が2つ以上ある（`--key = 1`）。 */
+  case RepeatedDash extends SyntaxReason("only a single leading '-' is allowed")
+
+  /** キーに空白が含まれる（`a b = 1`や`- key = 1`）。 */
   case WhitespaceInKey extends SyntaxReason("key must not contain whitespace")
 
   /** キーに空のセグメントがある（`a..b`、`.a`、`a.`）。 */

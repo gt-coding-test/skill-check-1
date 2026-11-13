@@ -49,7 +49,11 @@ class SysctlConfSuite extends munit.FunSuite {
         "net" -> Node(
           Map(
             "ipv4" -> Node(
-              Map("ip_local_reserved_ports" -> Leaf("8080,9148"), "ip_forward" -> Leaf("1"))
+              Map(
+                "ip_local_reserved_ports" -> Leaf("8080,9148"),
+                "ip_forward"              -> Leaf("1"),
+                "tcp_syncookies"          -> Leaf("1")
+              )
             ),
             "ipv6" -> Node(
               Map("conf" -> Node(Map("all" -> Node(Map("disable_ipv6" -> Leaf("1"))))))
@@ -63,6 +67,7 @@ class SysctlConfSuite extends munit.FunSuite {
       conf.entries.filter(_.ignoreErrors).map(_.key),
       Vector("net.ipv6.conf.all.disable_ipv6")
     )
+    assertEquals(conf.exclusions.map(_.key), Vector("net.ipv4.conf.all.rp_filter"))
   }
 
   // --- sysctl.conf(5)の文法 ------------------------------------------------
@@ -114,7 +119,7 @@ class SysctlConfSuite extends munit.FunSuite {
   }
 
   test("行頭の-はキーに含めずignoreErrorsとして保持する") {
-    val conf = parsed("-a.b = 1\n  - c = 2\nd = 3")
+    val conf = parsed("-a.b = 1\n  -c=2\nd = 3")
     assertEquals(
       conf.entries,
       Vector(
@@ -129,6 +134,66 @@ class SysctlConfSuite extends munit.FunSuite {
     )
   }
 
+  test("=の無い-keyは除外行として保持し、Mapには入れない") {
+    val conf =
+      parsed("-net.ipv4.conf.all.rp_filter\na = 1\n  -net/ipv4/conf/*/promote_secondaries  ")
+    assertEquals(
+      conf.exclusions,
+      Vector(
+        Exclusion("net.ipv4.conf.all.rp_filter", line = 1),
+        Exclusion("net.ipv4.conf.*.promote_secondaries", line = 3)
+      )
+    )
+    assertEquals(conf.tree, Map("a" -> Leaf("1")))
+    assertEquals(conf.toMap, Map("a" -> "1"))
+  }
+
+  test("/区切りのキーは.区切りに正規化する") {
+    val conf = parsed("net/ipv4/ip_forward = 1")
+    assertEquals(conf.toMap, Map("net.ipv4.ip_forward" -> "1"))
+    assertEquals(conf.tree, Map("net" -> Node(Map("ipv4" -> Node(Map("ip_forward" -> Leaf("1")))))))
+  }
+
+  test("最初の区切りが/なら/と.を入れ替える（名前に.を含むセグメントを1つとして扱う）") {
+    val conf = parsed("net/ipv4/conf/eth0.100/rp_filter = 1")
+    assertEquals(conf.toMap, Map("net.ipv4.conf.eth0/100.rp_filter" -> "1"))
+    assertEquals(
+      conf.tree,
+      Map(
+        "net" -> Node(
+          Map(
+            "ipv4" -> Node(
+              Map("conf" -> Node(Map("eth0/100" -> Node(Map("rp_filter" -> Leaf("1"))))))
+            )
+          )
+        )
+      )
+    )
+  }
+
+  test("最初の区切りが.なら/はセグメントの一部として残す") {
+    assertEquals(
+      parsed("net.ipv4.conf.eth0/100.rp_filter = 1").toMap,
+      Map("net.ipv4.conf.eth0/100.rp_filter" -> "1")
+    )
+  }
+
+  test("キーのglob（*）は展開せず、そのままセグメントとして格納する") {
+    assertEquals(
+      parsed("net.ipv4.conf.*.rp_filter = 2").tree,
+      Map(
+        "net" -> Node(
+          Map("ipv4" -> Node(Map("conf" -> Node(Map("*" -> Node(Map("rp_filter" -> Leaf("2"))))))))
+        )
+      )
+    )
+  }
+
+  test("取り除く空白はASCIIの空白のみ。全角スペースは値の一部として残る") {
+    assertEquals(parsed("\t a = 1 \t").toMap, Map("a" -> "1"))
+    assertEquals(parsed("a = 1\u3000").toMap, Map("a" -> "1\u3000"))
+  }
+
   test("CRLF改行と先頭のBOMを扱える") {
     assertEquals(parsed("\uFEFFa = 1\r\nb = 2\r\n").toMap, Map("a" -> "1", "b" -> "2"))
   }
@@ -136,6 +201,7 @@ class SysctlConfSuite extends munit.FunSuite {
   test("空の入力は空の設定になる") {
     val conf = parsed("")
     assertEquals(conf.entries, Vector.empty)
+    assertEquals(conf.exclusions, Vector.empty)
     assertEquals(conf.tree, Map.empty)
   }
 
@@ -183,17 +249,25 @@ class SysctlConfSuite extends munit.FunSuite {
   }
 
   test("キーが空ならエラー") {
-    List("= 1", "- = 1").foreach { input =>
+    List("= 1", "-= 1", "-").foreach { input =>
       assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.EmptyKey), input)
     }
   }
 
-  test("キーに空白があればエラー") {
-    assertEquals(SysctlConf.parse("a b = 1"), syntaxError(1, SyntaxReason.WhitespaceInKey))
+  test("行頭の-が2つ以上あればエラー") {
+    List("--a = 1", "--a").foreach { input =>
+      assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.RepeatedDash), input)
+    }
+  }
+
+  test("キーに空白があればエラー（-の直後の空白も含む）") {
+    List("a b = 1", "- c = 2", "- c").foreach { input =>
+      assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.WhitespaceInKey), input)
+    }
   }
 
   test("キーに空のセグメントがあればエラー") {
-    List(".a = 1", "a. = 1", "a..b = 1").foreach { input =>
+    List(".a = 1", "a. = 1", "a..b = 1", "a//b = 1", "-a..b").foreach { input =>
       assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.EmptySegment), input)
     }
   }
@@ -225,6 +299,23 @@ class SysctlConfSuite extends munit.FunSuite {
     )
   }
 
+  // --- ファイルのロード -----------------------------------------------------
+
+  private def withTempFile[A](bytes: Array[Byte])(body: Path => A): A = {
+    val file = Files.createTempFile("sysctl", ".conf")
+    try {
+      Files.write(file, bytes)
+      body(file)
+    } finally Files.delete(file)
+  }
+
+  test("BOM付きのUTF-8ファイルをロードできる") {
+    val bytes = Array[Byte](0xef.toByte, 0xbb.toByte, 0xbf.toByte) ++ "a = 1\n".getBytes("UTF-8")
+    withTempFile(bytes) { file =>
+      assertEquals(SysctlConf.load(file).map(_.toMap), Right(Map("a" -> "1")))
+    }
+  }
+
   test("存在しないファイルはIoエラー") {
     val missing = Paths.get("does-not-exist.conf")
     SysctlConf.load(missing) match {
@@ -233,11 +324,15 @@ class SysctlConfSuite extends munit.FunSuite {
     }
   }
 
+  test("ディレクトリを渡すとIoエラー") {
+    val dir = Files.createTempDirectory("sysctl")
+    try assert(SysctlConf.load(dir).left.exists(_.isInstanceOf[SysctlError.Io]))
+    finally Files.delete(dir)
+  }
+
   test("UTF-8として不正なファイルはIoエラー") {
-    val file = Files.createTempFile("sysctl", ".conf")
-    try {
-      Files.write(file, Array[Byte](0x61, 0x3d, 0xff.toByte))
+    withTempFile(Array[Byte](0x61, 0x3d, 0xff.toByte)) { file =>
       assert(SysctlConf.load(file).left.exists(_.isInstanceOf[SysctlError.Io]))
-    } finally Files.delete(file)
+    }
   }
 }
