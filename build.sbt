@@ -13,7 +13,10 @@ lazy val root = (project in file("."))
       "-Wvalue-discard",
       "-Werror"
     ),
-    libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test
+    libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
+    // `sbt "run ..."`で終了コードを返せるように、別プロセスで実行する
+    Compile / run / fork           := true,
+    Compile / run / outputStrategy := Some(StdoutOutput)
   )
 
 addCommandAlias("check", "scalafmtSbtCheck; scalafmtCheckAll; test")
