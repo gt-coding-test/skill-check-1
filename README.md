@@ -1,6 +1,15 @@
 # sysctl-conf
 
-Linuxの[sysctl.conf(5)](https://man7.org/linux/man-pages/man5/sysctl.conf.5.html)と同じ文法のファイルをロードし、Mapに格納するScala 3ライブラリです。
+Linuxの[sysctl.conf(5)](https://man7.org/linux/man-pages/man5/sysctl.conf.5.html)と同じ文法のファイルをロードし、Mapに格納するScala 3ライブラリです。スキーマファイルを一緒に渡すと、値の型やキーの過不足を検証できます。
+
+スキルチェック課題との対応は次のとおりです。
+
+| 課題 | 内容 | このREADMEの該当部分 | コード |
+| --- | --- | --- | --- |
+| 課題1 | ファイルをロードしてMapに格納する | [設定ファイルのロード](#設定ファイルのロード) | 提出時点は`task-1`タグ |
+| 課題2 | スキーマファイルで入力値を検証する | [スキーマによる検証](#スキーマによる検証) | 提出時点は`task-2`タグ（`task-1`タグからの差分が課題2の範囲） |
+
+細かい仕様は[docs/spec.md](docs/spec.md)、関数とエラーの一覧は[docs/api.md](docs/api.md)にあります。
 
 ## 使い方
 
@@ -8,6 +17,7 @@ Linuxの[sysctl.conf(5)](https://man7.org/linux/man-pages/man5/sysctl.conf.5.htm
 import java.nio.file.Paths
 import sysctlconf.*
 
+// 設定ファイルをロードする
 SysctlConf.load(Paths.get("app.conf")) match {
   case Right(conf) =>
     conf.tree            // キーを"."で階層化したMap[String, SysctlValue]
@@ -16,37 +26,45 @@ SysctlConf.load(Paths.get("app.conf")) match {
   case Left(error) =>
     println(error.message) // 例: "line 3: expected 'token = value' but '=' was not found"
 }
+
+// スキーマファイルとともにロードし、スキーマに従っているか検証する
+SysctlConf.load(Paths.get("app.conf"), Paths.get("app.schema")) match {
+  case Right(conf) => conf.tree // 検証を通った設定。中身はスキーマ無しの場合と同じ
+  case Left(error) => println(error.message) // 例: "line 2: key 'debug' expects bool but got 'yes'"
+}
 ```
 
-文字列を直接パースする場合は`SysctlConf.parse(text)`を使います。
+例外は投げず、失敗はすべて`Either`の`Left`で返します。文字列を直接パースする場合は`SysctlConf.parse(text)`と`SysctlConf.parse(text, schema)`を使います。
 
-## 入力と出力の例
+### 手元のファイルで試す
 
-課題の入力例1・2を`SysctlConf.load`でロードしたときに、変数に格納される内容です（同じファイルが`src/test/resources/`にあり、テストで検証しています）。
+ライブラリを呼び出す小さな実行用コード（`Main`）を用意しています。設定ファイルと、任意でスキーマファイルのパスを渡すと、格納された内容かエラーを表示します。
 
-### 入力例1
-
-入力（`example1.conf`）
-
-```
-endpoint = localhost:3000
-debug = true
-log.file = /var/log/console.log
+```bash
+sbt "run src/test/resources/example1.conf"
+sbt "run src/test/resources/example1.conf src/test/resources/example.schema"
+sbt "run src/test/resources/example2.conf src/test/resources/example.schema --allow-unknown-keys"
 ```
 
-出力（`conf.tree`）
+1つ目のコマンドの出力
 
-```scala
-Map(
-  "endpoint" -> Leaf("localhost:3000"),
-  "debug"    -> Leaf("true"),
-  "log"      -> Node(Map(
-    "file" -> Leaf("/var/log/console.log")
-  ))
-)
+```
+{
+  "endpoint": "localhost:3000",
+  "debug": "true",
+  "log": {
+    "file": "/var/log/console.log"
+  }
+}
 ```
 
-### 入力例2
+失敗した場合はエラーを標準エラー出力に表示し、終了コード1で終わります。sbt経由で実行しているので、このときsbt自身の`[error] nonzero exit code returned from runner: 1`という行も続けて表示されます。`--allow-unknown-keys`は、スキーマに無いキーを許容する指定です。
+
+## 設定ファイルのロード
+
+sysctl.conf形式のファイルをロードし、キーを`.`で階層化したMapに格納します。値はすべて文字列として保持します。
+
+課題1の入力例2をロードした結果です。入力例1の結果と、階層化しない`conf.toMap`の形は[docs/spec.md](docs/spec.md#ロードの例)にあります。
 
 入力（`example2.conf`）
 
@@ -69,73 +87,99 @@ Map(
 )
 ```
 
-同じ入力に対する`conf.toMap`（階層化しない形）
+## スキーマによる検証
 
-```scala
-Map(
-  "endpoint" -> "localhost:3000",
-  "log.file" -> "/var/log/console.log",
-  "log.name" -> "default.log"
-)
+設定ファイルと一緒にスキーマファイルを渡すと、設定がスキーマに従っているかを検証します。従っていなければ、不備をすべてまとめたエラーを返します。検証を通った設定の中身は、スキーマ無しでロードした場合と同じです。
+
+### スキーマファイルの書式
+
+```
+# コメント
+endpoint -> string!
+debug    -> bool
+log.file -> string
+retry    -> integer
 ```
 
-## API
+- 1行は`key -> type`形式。`->`の前後の空白は任意
+- 型の後ろに`!`を付けると必須のキーになる。付けなければ省略可で、設定に書かれている場合だけ型を検証する
+- 空行、および`#`か`;`で始まる行は無視（設定ファイルと同じ）
+- キーの書き方は設定ファイルと同じで、階層のあるキーは`log.file`のように完全なキーで書く
 
-| 名前 | 内容 |
-| --- | --- |
-| `SysctlConf.load(path)` | ファイルをUTF-8で読み込んでパースする。`Either[SysctlError, SysctlConf]` |
-| `SysctlConf.parse(text)` | 文字列をパースする。`Either[SysctlError, SysctlConf]` |
-| `conf.tree` | キーを`.`で階層化した`Map[String, SysctlValue]`（`Leaf(value)` / `Node(children)`） |
-| `conf.toMap` | 階層化しない`Map[String, String]` |
-| `conf.get(key)` | ドット区切りのキーで値を引く |
-| `conf.entries` | 出現順の全設定行（キー・値・`-`の有無・行番号） |
-| `conf.exclusions` | `-key`形式の除外行（キー・行番号） |
+課題のスキーマ例（`endpoint -> string`など4行）は、この書式のままロードできます。`!`が無いので、4つのキーはすべて省略可になります。
 
-例外は投げず、失敗は`SysctlError`で返します。
+型は`string`、`bool`（`true` / `false`）、`integer`、`float`の4種類です。受け付ける値の詳細は[docs/spec.md](docs/spec.md#スキーマファイルの書式)にあります。
 
-| エラー | 内容 |
-| --- | --- |
-| `Io(path, cause)` | ファイルを読み込めない |
-| `Syntax(line, reason)` | 文法エラー。`reason`は`SyntaxReason`（`MissingEquals` / `EmptyKey` / `RepeatedDash` / `WhitespaceInKey` / `EmptySegment`） |
-| `KeyConflict(line, key, definedAt)` | `key`が`definedAt`行目のキーと階層上で衝突している |
+### 課題のスキーマ例と、課題1の入力例
 
-## 文法と仕様
+課題のスキーマ例（`src/test/resources/example.schema`）
 
-sysctl.conf(5)に書かれているもの:
+```
+endpoint -> string
+debug -> bool
+log.file -> string
+retry -> integer
+```
 
-- 1行は`token = value`形式。`=`の前後の空白は任意
-- 空行、および`#`か`;`で始まる行は無視
-- 値に引用符は不要で、空白を含められる（`kernel.modprobe = /sbin/mod probe`）
-- 行頭の`-`は「設定に失敗しても無視する」の意味。キーには含めず`Entry.ignoreErrors`として保持する
+このスキーマで課題1の入力例1・2を検証した結果です。
 
-manページに無く、procpsのsysctl(8)の実装（`sysctl.c`）に合わせたもの:
-
-| ケース | 挙動 |
-| --- | --- |
-| 行頭・行末の空白 | 取り除く（インデントされたコメントも無視）。空白の定義はCの`isspace`と同じASCIIの空白のみ |
-| 値に含まれる`=` `#` `;` | 値の一部として扱う（最初の`=`で分割、行内コメントは無い） |
-| `=`の無い`-key` | 「このキーには設定しない」という除外行。値が無いのでMapには入れず、`conf.exclusions`に保持する |
-| `/`区切りのキー | `net/ipv4/ip_forward`は`net.ipv4.ip_forward`に正規化する。最初の区切りが`/`なら`/`と`.`を入れ替えるので、`net/ipv4/conf/eth0.100/rp_filter`の`eth0.100`は1つのセグメント（`eth0/100`）になる |
-| 同じキーの重複 | 後勝ち。`entries`には全て残る |
-
-このライブラリで決めたもの:
-
-| ケース | 挙動 | 理由 |
+| 入力 | 結果 | 理由 |
 | --- | --- | --- |
-| `=`が無い行（除外行を除く） | `Syntax`エラーでロード全体を失敗させる | sysctl(8)は警告して続行するが、ライブラリが黙って読み飛ばすと設定ミスに気付けないため |
-| キーが空、`--key`、キーに空白（`- key`を含む）、空セグメント（`a..b`） | `Syntax`エラー | manページの「single -」に従い、階層化したときに意味を持たないキーを受け付けないため |
-| キーに全角スペースなど非ASCIIの空白 | `Syntax`エラー | 前後の除去はASCIIの空白だけなので、行頭や`=`の直前の全角スペースが黙ってキーの一部になるのを防ぐため。値に含まれる分はそのまま残す |
-| `log = a`と`log.file = b`の同居 | `KeyConflict`エラー | 1つのキーが値と階層の両方になり、Mapに格納できないため |
-| 値が空（`key =`） | 空文字列として格納 | 汎用の設定ファイルとして「空」を表現できるようにするため |
-| 値の型 | すべて`String` | sysctl.confに型は無く、`true`や`3000`の解釈は利用側の責務 |
-| 順序 | 定義順を保持 | 出力やデバッグ時にファイルと対応が取りやすい |
-| エラーの件数 | 最初の1件だけを返す | 戻り値を単純に保つため |
+| 入力例1（`example1.conf`） | 通る | 書かれている3つのキーは型に合っている。`retry`は`!`が無いので省略できる |
+| 入力例2（`example2.conf`） | エラー: `line 4: key 'log.name' is not defined in the schema` | `log.name`がスキーマに無い。キーの書き間違いと区別できないので、既定ではエラーにする |
+| 入力例2（スキーマに無いキーを許容） | 通る | `schema.allowUnknownKeys`、または`sbt run`の`--allow-unknown-keys`を指定した場合 |
 
-対象外:
+### 不備のある設定の例
 
-- キーのglob（`net.ipv4.conf.*.rp_filter`）の展開。`*`はそのままセグメント名として格納する
-- 除外行の適用。`conf.exclusions`に保持するだけで、`tree`や`toMap`からキーを取り除くことはしない
-- 値の最大長4096文字（カーネルの/proc由来の制限）のチェック
+スキーマ（`src/test/resources/strict.schema`）
+
+```
+# 必須のキーには型の後ろに!を付ける
+endpoint -> string!
+debug    -> bool
+log.file -> string
+retry    -> integer!
+```
+
+入力（`src/test/resources/invalid.conf`）
+
+```
+endpoint = localhost:3000
+debug = yes
+log.file = /var/log/console.log
+log.name = default.log
+```
+
+出力: `Left(SchemaViolation(...))`。`error.message`は次のとおり
+
+```
+line 2: key 'debug' expects bool but got 'yes'
+line 4: key 'log.name' is not defined in the schema
+required key 'retry' is missing (required at schema line 5)
+```
+
+## 主な設計判断
+
+課題文に書かれていない点のうち、迷ったものと決めた理由です。仕様の全体は[docs/spec.md](docs/spec.md)にあります。
+
+### 設定ファイルのロード
+
+| 決めたこと | 理由 |
+| --- | --- |
+| 値はすべて文字列で保持する | sysctl.confに型は無いため。型を確かめたい場合はスキーマを使う |
+| manページに無い文法は、procpsのsysctl(8)の実装に合わせる | `=`の無い`-key`（除外行）や`/`区切りのキーを含む、実在の設定ファイルをロードできるようにするため |
+| `=`の無い行はエラーにする | sysctl(8)は警告して続行するが、ライブラリが黙って読み飛ばすと設定ミスに気付けないため |
+| `log = a`と`log.file = b`の同居はエラーにする | 1つのキーが値と階層の両方になり、Mapに格納できないため |
+
+### スキーマによる検証
+
+| 決めたこと | 理由 |
+| --- | --- |
+| スキーマのキーは既定で省略可、`!`を付けると必須 | 課題のスキーマ例の`retry`は課題1の入力例に無い。書いただけで必須になると、例同士が通らなくなるため |
+| スキーマに無いキーは既定でエラー | キーの書き間違いを見つけるため。一部のキーだけ検証したい場合は`schema.allowUnknownKeys`で許容できる |
+| 検証のエラーは全件を返す | 文法エラーは設定の内容を確定できないので最初の1件で止めるが、検証は内容が確定した後なので、まとめて返せる |
+| 誤記と思われるスキーマはスキーマのエラーにする | キーの重複や、1つの設定で同時には持てない`log`と`log.file`の両方の定義は、どちらかが誤記の可能性が高い。検証が素通りしたり、設定側のエラーとして報告されたりすると原因が分かりにくいため |
+| 課題1のAPIと格納形式は変えない | 検証はスキーマを渡す`load`と`parse`として足した。検証後の値も文字列のまま |
 
 ## 開発
 
@@ -145,6 +189,7 @@ manページに無く、procpsのsysctl(8)の実装（`sysctl.c`）に合わせ�
 sbt test        # テスト
 sbt scalafmtAll # フォーマット
 sbt check       # CIと同じチェック（フォーマット確認 + テスト）
+sbt "run <設定ファイル> [<スキーマファイル>]" # 手元のファイルで試す
 ```
 
 ## 構成
@@ -153,7 +198,20 @@ sbt check       # CIと同じチェック（フォーマット確認 + テスト
 src/main/scala/sysctlconf/
   SysctlConf.scala   ロード・パース・階層化
   SysctlValue.scala  階層化した値（Leaf / Node）
-  SysctlError.scala  エラー型
+  SysctlError.scala  ロード時のエラー型
+  Schema.scala       スキーマのロード・パースと検証
+  SchemaError.scala  スキーマファイルのエラー型
+  Violation.scala    検証で見つかった不備
+  LineSyntax.scala   設定とスキーマに共通する、行とキーの扱い（内部用）
+  Main.scala         手元のファイルで試すための実行用コード
 src/test/scala/      テスト
-src/test/resources/  テスト用の設定ファイル（課題の入力例1・2、文法を一通り含むfull-syntax.conf）
+src/test/resources/  テスト用のファイル
+  example1.conf, example2.conf  課題1の入力例1・2
+  full-syntax.conf              文法を一通り含む設定
+  example.schema                課題2のスキーマ例
+  with-retry.conf               課題2のスキーマ例の4つのキーをすべて持つ設定
+  strict.schema, invalid.conf   必須つきのスキーマと、不備のある設定（READMEの例）
+docs/
+  spec.md            文法と検証の細かい仕様
+  api.md             関数とエラーの一覧
 ```

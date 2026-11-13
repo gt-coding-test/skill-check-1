@@ -1,8 +1,6 @@
 package sysctlconf
 
-import java.io.IOException
-import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 import scala.collection.immutable.VectorMap
 
 /** `key = value`形式の1行分の設定。
@@ -51,7 +49,21 @@ object SysctlConf {
 
   /** ファイルをUTF-8として読み込んでパースする。 */
   def load(path: Path): Either[SysctlError, SysctlConf] =
-    readFile(path).flatMap(parse)
+    LineSyntax.readFile(path).left.map(SysctlError.Io(path, _)).flatMap(parse)
+
+  /** ファイルをロードし、スキーマファイルに従っているか検証する。
+    *
+    * スキーマファイルの書式は[[Schema.parse]]、検証の内容は[[Schema.validate]]を参照。
+    *
+    * 先にスキーマファイルをロードし、不備があれば[[SysctlError.InvalidSchema]]を返す。続いて設定ファイルをロードし、
+    * 設定がスキーマに従っていなければ[[SysctlError.SchemaViolation]]を返す。
+    */
+  def load(path: Path, schemaPath: Path): Either[SysctlError, SysctlConf] =
+    Schema.load(schemaPath).left.map(SysctlError.InvalidSchema(_)).flatMap(load(path, _))
+
+  /** ファイルをロードし、ロード済みのスキーマに従っているか検証する。 */
+  def load(path: Path, schema: Schema): Either[SysctlError, SysctlConf] =
+    load(path).flatMap(validate(_, schema))
 
   /** sysctl.conf形式の文字列をパースする。
     *
@@ -68,10 +80,10 @@ object SysctlConf {
   def parse(input: String): Either[SysctlError, SysctlConf] = {
     val empty: Either[SysctlError, SysctlConf] =
       Right(new SysctlConf(Vector.empty, Vector.empty, VectorMap.empty))
-    input.stripPrefix(Bom).linesIterator.zipWithIndex.foldLeft(empty) { case (acc, (raw, index)) =>
+    LineSyntax.lines(input).foldLeft(empty) { case (acc, (text, line)) =>
       for {
         conf   <- acc
-        parsed <- parseLine(raw, index + 1)
+        parsed <- parseLine(text, line)
         next   <- parsed match {
           case Line.Skip               => Right(conf)
           case Line.Exclude(exclusion) =>
@@ -85,7 +97,12 @@ object SysctlConf {
     }
   }
 
-  private val Bom = "\uFEFF"
+  /** 文字列をパースし、ロード済みのスキーマに従っているか検証する。 */
+  def parse(input: String, schema: Schema): Either[SysctlError, SysctlConf] =
+    parse(input).flatMap(validate(_, schema))
+
+  private def validate(conf: SysctlConf, schema: Schema): Either[SysctlError, SysctlConf] =
+    schema.validate(conf).left.map(SysctlError.SchemaViolation(_))
 
   private type Tree = VectorMap[String, SysctlValue]
 
@@ -95,66 +112,24 @@ object SysctlConf {
     case Exclude(exclusion: Exclusion)
   }
 
-  private def readFile(path: Path): Either[SysctlError, String] =
-    try Right(Files.readString(path, StandardCharsets.UTF_8))
-    catch { case e: IOException => Left(SysctlError.Io(path, e)) }
-
-  /** Cの`isspace`と同じ空白の定義。行・キー・値の前後の除去に使う。 */
-  private def isSpace(c: Char): Boolean =
-    c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r'
-
-  /** 全角スペースやNBSPを含む、Unicodeの空白。キーの検査に使う。
-    *
-    * 前後の除去はsysctl(8)に合わせてASCIIの空白だけを対象にするので、全角スペースはキーの側に残る。 見た目で気付けない入力ミスになるため、キーに含まれていたらエラーにする。
-    */
-  private def isAnySpace(c: Char): Boolean = isSpace(c) || c.isWhitespace || c.isSpaceChar
-
-  private def stripLeft(s: String): String  = s.dropWhile(isSpace)
-  private def stripRight(s: String): String = s.take(s.lastIndexWhere(!isSpace(_)) + 1)
-
-  private def parseLine(raw: String, line: Int): Either[SysctlError, Line] = {
-    val text = stripRight(stripLeft(raw))
-    if (text.isEmpty || text.startsWith("#") || text.startsWith(";")) Right(Line.Skip)
+  /** 前後の空白を除いた1行をパースする。 */
+  private def parseLine(text: String, line: Int): Either[SysctlError, Line] =
+    if (LineSyntax.isIgnored(text)) Right(Line.Skip)
     else {
-      val dash = text.startsWith("-")
-      val body = if (dash) text.drop(1) else text
-      body.indexOf('=') match {
-        case -1 if dash => normalizeKey(body, line).map(key => Line.Exclude(Exclusion(key, line)))
-        case -1         => Left(SysctlError.Syntax(line, SyntaxReason.MissingEquals))
-        case i          =>
-          val value = stripLeft(body.drop(i + 1))
-          normalizeKey(stripRight(body.take(i)), line)
+      val dash   = text.startsWith("-")
+      val body   = if (dash) text.drop(1) else text
+      val result = body.indexOf('=') match {
+        case _ if body.startsWith("-") => Left(SyntaxReason.RepeatedDash)
+        case -1 if dash                =>
+          LineSyntax.normalizeKey(body).map(key => Line.Exclude(Exclusion(key, line)))
+        case -1 => Left(SyntaxReason.MissingEquals)
+        case i  =>
+          val value = LineSyntax.stripLeft(body.drop(i + 1))
+          LineSyntax
+            .normalizeKey(LineSyntax.stripRight(body.take(i)))
             .map(key => Line.Setting(Entry(key, value, ignoreErrors = dash, line)))
       }
-    }
-  }
-
-  /** キーを検査し、`.`区切りに正規化して返す。 */
-  private def normalizeKey(raw: String, line: Int): Either[SysctlError, String] = {
-    def error(reason: SyntaxReason) = Left(SysctlError.Syntax(line, reason))
-
-    val key = toDotted(raw)
-    if (raw.isEmpty) error(SyntaxReason.EmptyKey)
-    else if (raw.startsWith("-")) error(SyntaxReason.RepeatedDash)
-    else if (raw.exists(isAnySpace)) error(SyntaxReason.WhitespaceInKey)
-    else if (key.split("\\.", -1).exists(_.isEmpty)) error(SyntaxReason.EmptySegment)
-    else Right(key)
-  }
-
-  /** sysctl(8)と同じ規則で区切り文字を`.`に揃える。
-    *
-    * 最初に現れた区切りが`/`なら、`/`と`.`を入れ替える。`net/ipv4/conf/eth0.100/rp_filter`は
-    * `net.ipv4.conf.eth0/100.rp_filter`になり、名前に`.`を含むインターフェースも1セグメントとして扱える。
-    */
-  private def toDotted(key: String): String =
-    key.find(c => c == '.' || c == '/') match {
-      case Some('/') =>
-        key.map {
-          case '/' => '.'
-          case '.' => '/'
-          case c   => c
-        }
-      case _ => key
+      result.left.map(SysctlError.Syntax(line, _))
     }
 
   /** `path`の位置に値を置いた新しいツリーを返す。値と階層が同じ位置に来る場合は`None`。 */
@@ -179,10 +154,10 @@ object SysctlConf {
 
   /** `entry`と衝突している定義済みのキー（一方がもう一方の階層の途中にあるもの）を探してエラーにする。 */
   private def conflict(entries: Vector[Entry], entry: Entry): SysctlError = {
-    def isAncestor(a: String, b: String) = b.startsWith(a + ".")
-
     val definedAt = entries
-      .findLast(e => isAncestor(e.key, entry.key) || isAncestor(entry.key, e.key))
+      .findLast { e =>
+        LineSyntax.isAncestor(e.key, entry.key) || LineSyntax.isAncestor(entry.key, e.key)
+      }
       .fold(entry.line)(_.line)
     SysctlError.KeyConflict(entry.line, entry.key, definedAt)
   }

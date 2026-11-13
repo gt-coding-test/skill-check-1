@@ -1,0 +1,5 @@
+# 必須のキーには型の後ろに!を付ける
+endpoint -> string!
+debug    -> bool
+log.file -> string
+retry    -> integer!
