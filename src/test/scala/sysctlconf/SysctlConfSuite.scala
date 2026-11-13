@@ -130,7 +130,7 @@ class SysctlConfSuite extends munit.FunSuite {
   }
 
   test("CRLF改行と先頭のBOMを扱える") {
-    assertEquals(parsed("﻿a = 1\r\nb = 2\r\n").toMap, Map("a" -> "1", "b" -> "2"))
+    assertEquals(parsed("\uFEFFa = 1\r\nb = 2\r\n").toMap, Map("a" -> "1", "b" -> "2"))
   }
 
   test("空の入力は空の設定になる") {

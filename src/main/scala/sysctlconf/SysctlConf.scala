@@ -52,7 +52,7 @@ object SysctlConf {
     * 最初に見つかったエラーを`Left`で返す。
     */
   def parse(input: String): Either[SysctlError, SysctlConf] = {
-    val lines = input.stripPrefix("﻿").linesIterator.zipWithIndex
+    val lines = input.stripPrefix("\uFEFF").linesIterator.zipWithIndex
 
     val init: Either[SysctlError, (Vector[Entry], Tree)] = Right((Vector.empty, VectorMap.empty))
     lines
