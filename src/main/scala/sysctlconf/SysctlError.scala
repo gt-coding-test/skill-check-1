@@ -9,18 +9,34 @@ enum SysctlError {
   case Io(path: Path, cause: Throwable)
 
   /** `line`行目（1始まり）がsysctl.confの文法に従っていない。 */
-  case Syntax(line: Int, reason: String)
+  case Syntax(line: Int, reason: SyntaxReason)
 
-  /** `line`行目の`key`が、既に定義済みのキーと階層上で衝突している。
+  /** `line`行目の`key`が、`definedAt`行目で定義済みのキーと階層上で衝突している。
     *
     * 例: `log = a`と`log.file = b`は、`log`が値と階層の両方になるため同居できない。
     */
-  case KeyConflict(line: Int, key: String)
+  case KeyConflict(line: Int, key: String, definedAt: Int)
 
   def message: String = this match {
-    case Io(path, cause)        => s"failed to read $path: $cause"
-    case Syntax(line, reason)   => s"line $line: $reason"
-    case KeyConflict(line, key) =>
-      s"line $line: key '$key' conflicts with a previously defined key"
+    case Io(path, cause)                   => s"failed to read $path: $cause"
+    case Syntax(line, reason)              => s"line $line: ${reason.message}"
+    case KeyConflict(line, key, definedAt) =>
+      s"line $line: key '$key' conflicts with the key defined at line $definedAt"
   }
+}
+
+/** [[SysctlError.Syntax]]の理由。 */
+enum SyntaxReason(val message: String) {
+
+  /** `=`が無い。 */
+  case MissingEquals extends SyntaxReason("expected 'token = value' but '=' was not found")
+
+  /** キーが空（`= 1`）。 */
+  case EmptyKey extends SyntaxReason("key is empty")
+
+  /** キーに空白が含まれる（`a b = 1`）。 */
+  case WhitespaceInKey extends SyntaxReason("key must not contain whitespace")
+
+  /** キーに空のセグメントがある（`a..b`、`.a`、`a.`）。 */
+  case EmptySegment extends SyntaxReason("key must not contain an empty segment")
 }

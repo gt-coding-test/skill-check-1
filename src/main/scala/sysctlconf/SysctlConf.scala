@@ -28,7 +28,7 @@ final case class Entry(key: String, value: String, ignoreErrors: Boolean, line: 
 final case class SysctlConf private (entries: Vector[Entry], tree: Map[String, SysctlValue]) {
 
   /** キーを階層化しないフラットなMap（`"log.file" -> "/var/log/console.log"`）。重複キーは後勝ち。 */
-  def toMap: Map[String, String] =
+  lazy val toMap: Map[String, String] =
     entries.foldLeft(VectorMap.empty[String, String])((acc, e) => acc.updated(e.key, e.value))
 
   /** ドット区切りのキーで値を引く。キーが無い、または階層の途中を指している場合は`None`。 */
@@ -64,7 +64,9 @@ object SysctlConf {
           next   <- parsed match {
             case None        => Right(state)
             case Some(entry) =>
-              insert(tree, entry.key.split('.').toList, entry).map((entries :+ entry, _))
+              insert(tree, entry.key.split('.').toList, entry.value)
+                .toRight(conflict(entries, entry))
+                .map((entries :+ entry, _))
           }
         } yield next
       }
@@ -85,7 +87,7 @@ object SysctlConf {
       val ignoreErrors = trimmed.startsWith("-")
       val body         = if (ignoreErrors) trimmed.drop(1) else trimmed
       body.indexOf('=') match {
-        case -1 => Left(SysctlError.Syntax(line, "expected 'token = value' but '=' was not found"))
+        case -1 => Left(SysctlError.Syntax(line, SyntaxReason.MissingEquals))
         case i  =>
           val key   = body.take(i).trim
           val value = body.drop(i + 1).trim
@@ -95,32 +97,39 @@ object SysctlConf {
   }
 
   private def validateKey(key: String, line: Int): Either[SysctlError, Unit] =
-    if (key.isEmpty) Left(SysctlError.Syntax(line, "key is empty"))
+    if (key.isEmpty) Left(SysctlError.Syntax(line, SyntaxReason.EmptyKey))
     else if (key.exists(_.isWhitespace))
-      Left(SysctlError.Syntax(line, s"key '$key' must not contain whitespace"))
+      Left(SysctlError.Syntax(line, SyntaxReason.WhitespaceInKey))
     else if (key.split("\\.", -1).exists(_.isEmpty))
-      Left(SysctlError.Syntax(line, s"key '$key' has an empty segment"))
+      Left(SysctlError.Syntax(line, SyntaxReason.EmptySegment))
     else Right(())
 
-  /** `path`の位置に値を置いた新しいツリーを返す。値と階層が同じ位置に来る場合は衝突。 */
-  private def insert(tree: Tree, path: List[String], entry: Entry): Either[SysctlError, Tree] = {
-    def conflict = Left(SysctlError.KeyConflict(entry.line, entry.key))
+  /** `path`の位置に値を置いた新しいツリーを返す。値と階層が同じ位置に来る場合は`None`。 */
+  private def insert(tree: Tree, path: List[String], value: String): Option[Tree] =
     path match {
-      case Nil         => Right(tree)
+      case Nil         => Some(tree)
       case leaf :: Nil =>
         tree.get(leaf) match {
-          case Some(_: SysctlValue.Node) => conflict
-          case _                         => Right(tree.updated(leaf, SysctlValue.Leaf(entry.value)))
+          case Some(_: SysctlValue.Node) => None
+          case _                         => Some(tree.updated(leaf, SysctlValue.Leaf(value)))
         }
       case head :: rest =>
-        val child: Either[SysctlError, Tree] = tree.get(head) match {
-          case None                             => Right(VectorMap.empty)
-          case Some(SysctlValue.Node(children)) => Right(VectorMap.from(children))
-          case Some(_: SysctlValue.Leaf)        => conflict
+        val child: Option[Tree] = tree.get(head) match {
+          case None                             => Some(VectorMap.empty)
+          case Some(SysctlValue.Node(children)) => Some(VectorMap.from(children))
+          case Some(_: SysctlValue.Leaf)        => None
         }
         child
-          .flatMap(insert(_, rest, entry))
+          .flatMap(insert(_, rest, value))
           .map(sub => tree.updated(head, SysctlValue.Node(sub)))
     }
+
+  /** `entry`と衝突している定義済みのキー（一方がもう一方の階層の途中にあるもの）を探してエラーにする。 */
+  private def conflict(entries: Vector[Entry], entry: Entry): SysctlError = {
+    def isAncestor(a: String, b: String) = b.startsWith(a + ".")
+    val definedAt                        = entries
+      .findLast(e => isAncestor(e.key, entry.key) || isAncestor(entry.key, e.key))
+      .fold(entry.line)(_.line)
+    SysctlError.KeyConflict(entry.line, entry.key, definedAt)
   }
 }

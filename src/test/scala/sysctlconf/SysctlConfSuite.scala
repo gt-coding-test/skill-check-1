@@ -170,33 +170,59 @@ class SysctlConfSuite extends munit.FunSuite {
 
   // --- エラー ---------------------------------------------------------------
 
+  private def syntaxError(line: Int, reason: SyntaxReason): Either[SysctlError, SysctlConf] =
+    Left(SysctlError.Syntax(line, reason))
+
   test("=が無い行は行番号つきのSyntaxエラー") {
+    val result = SysctlConf.parse("a = 1\n\nbroken line")
+    assertEquals(result, syntaxError(3, SyntaxReason.MissingEquals))
     assertEquals(
-      SysctlConf.parse("a = 1\n\nbroken line").left.map(_.message),
+      result.left.map(_.message),
       Left("line 3: expected 'token = value' but '=' was not found")
     )
   }
 
   test("キーが空ならエラー") {
-    assert(SysctlConf.parse("= 1").left.exists(_.isInstanceOf[SysctlError.Syntax]))
-    assert(SysctlConf.parse("- = 1").left.exists(_.isInstanceOf[SysctlError.Syntax]))
+    List("= 1", "- = 1").foreach { input =>
+      assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.EmptyKey), input)
+    }
   }
 
-  test("キーに空のセグメントや空白があればエラー") {
-    List(".a = 1", "a. = 1", "a..b = 1", "a b = 1").foreach { input =>
-      assert(SysctlConf.parse(input).left.exists(_.isInstanceOf[SysctlError.Syntax]), input)
+  test("キーに空白があればエラー") {
+    assertEquals(SysctlConf.parse("a b = 1"), syntaxError(1, SyntaxReason.WhitespaceInKey))
+  }
+
+  test("キーに空のセグメントがあればエラー") {
+    List(".a = 1", "a. = 1", "a..b = 1").foreach { input =>
+      assertEquals(SysctlConf.parse(input), syntaxError(1, SyntaxReason.EmptySegment), input)
     }
+  }
+
+  test("エラーが複数あっても最初の1件だけを返す") {
+    assertEquals(SysctlConf.parse("x\ny\n= 1"), syntaxError(1, SyntaxReason.MissingEquals))
   }
 
   test("値を持つキーの下に階層を作ろうとするとKeyConflict") {
     assertEquals(
       SysctlConf.parse("log = a\nlog.file = b"),
-      Left(SysctlError.KeyConflict(2, "log.file"))
+      Left(SysctlError.KeyConflict(line = 2, key = "log.file", definedAt = 1))
     )
   }
 
   test("階層を持つキーに値を入れようとするとKeyConflict") {
-    assertEquals(SysctlConf.parse("log.file = b\nlog = a"), Left(SysctlError.KeyConflict(2, "log")))
+    assertEquals(
+      SysctlConf.parse("log.file = b\nlog = a"),
+      Left(SysctlError.KeyConflict(line = 2, key = "log", definedAt = 1))
+    )
+  }
+
+  test("3階層以上離れたキーの衝突も、衝突相手の行つきで検出する") {
+    val result = SysctlConf.parse("a.b = 1\nab.c = 0\na.b.c.d = 2")
+    assertEquals(result, Left(SysctlError.KeyConflict(line = 3, key = "a.b.c.d", definedAt = 1)))
+    assertEquals(
+      result.left.map(_.message),
+      Left("line 3: key 'a.b.c.d' conflicts with the key defined at line 1")
+    )
   }
 
   test("存在しないファイルはIoエラー") {
